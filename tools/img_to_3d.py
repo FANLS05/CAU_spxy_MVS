@@ -191,6 +191,8 @@ def resolve_auto_views(args):
         swap_left_right=args.swap_left_right,
         strict=args.strict_views,
         min_coverage=args.min_coverage,
+        size_weight=args.size_weight,
+        border_penalty=args.border_penalty,
     )
     colmap_views.print_selection(sel)
     if args.views_json:
@@ -507,6 +509,11 @@ def main():
                         help="交换 left/right(左右约定相反时用)")
     parser.add_argument("--min-coverage", type=float, default=0.0,
                         help="mask 覆盖率低于此值的图不参与,0.01 = 1%%")
+    parser.add_argument("--size-weight", type=float, default=15.0,
+                        help="自动选图时「目标又大又完整」的权重(折合方位角,度),"
+                             "默认 15;0=只看角度")
+    parser.add_argument("--border-penalty", type=float, default=0.5,
+                        help="目标贴画面边缘时质量打折比例,默认 0.5")
     parser.add_argument("--views-json", help="把自动选图结果写到 json")
     parser.add_argument("--views-preview", help="把选中的图拼成一张预览图")
     parser.add_argument("--dry-run", action="store_true",

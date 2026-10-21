@@ -473,7 +473,13 @@ def selftest():
 # 七、主流程
 # =============================================================================
 def parse_texts(text_args, text_file):
-    out = [t for t in (text_args or [])]
+    """收集概念,顺序即类别 id。
+
+    `--text` 既可以重复写(`--text a --text b`),也可以用逗号分隔
+    (`--text "a,b"`)。两种写法等价 —— 文档里一直写的是逗号形式,
+    但 argparse 的 action='append' 不会自动拆,所以在这里统一拆。
+    """
+    raw = [t for t in (text_args or [])]
     if text_file:
         if not os.path.isfile(text_file):
             raise SystemExit(f'--text-file 不存在: {text_file}')
@@ -481,7 +487,14 @@ def parse_texts(text_args, text_file):
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#'):
-                    out.append(line)
+                    raw.append(line)
+    out = []
+    for item in raw:
+        # 同时接受英文逗号和中文逗号
+        for part in item.replace('，', ',').split(','):
+            part = part.strip()
+            if part:
+                out.append(part)
     return out
 
 
@@ -498,7 +511,7 @@ def build_parser():
     ap.add_argument('--out', default=None, help='mask 输出目录(必填)')
 
     ap.add_argument('--text', action='append', default=None,
-                    help='文字概念,**可重复**。顺序即类别 id 顺序')
+                    help='文字概念,**可重复**,也可用逗号分隔。顺序即类别 id 顺序')
     ap.add_argument('--text-file', dest='text_file', default=None,
                     help='每行一个概念,# 开头是注释')
 

@@ -37,6 +37,27 @@ JPEG_QUALITY="${JPEG_QUALITY:-2}" # ffmpeg -q:v,越小质量越高(2~5 合适)
 MATCHER="${MATCHER:-exhaustive}"
 SEQUENTIAL_OVERLAP="${SEQUENTIAL_OVERLAP:-10}"
 
+# COLMAP 注册阈值。默认放宽(适合弱纹理桌面物体/目标小的场景),
+# 想用 COLMAP 官方默认值:COLMAP_RELAXED=0 ./run_pipeline.sh ...
+COLMAP_RELAXED="${COLMAP_RELAXED:-1}"
+if [[ "$COLMAP_RELAXED" == "1" ]]; then
+    SIFT_PEAK="${SIFT_PEAK:-0.004}"        # 官方 0.00667,越低特征越多
+    SIFT_FEATURES="${SIFT_FEATURES:-16384}" # 官方 8192
+    MATCH_RATIO="${MATCH_RATIO:-0.85}"      # 官方 0.8,越大越容易配上
+    MATCH_DISTANCE="${MATCH_DISTANCE:-0.8}" # 官方 0.7
+    TWO_VIEW_INLIERS="${TWO_VIEW_INLIERS:-8}"      # 官方 15
+    INIT_INLIERS="${INIT_INLIERS:-50}"             # 官方 100
+    ABS_INLIERS="${ABS_INLIERS:-15}"               # 官方 30
+    ABS_RATIO="${ABS_RATIO:-0.15}"                 # 官方 0.25
+    FILTER_REPROJ="${FILTER_REPROJ:-6}"            # 官方 4(像素)
+    TRI_ANGLE="${TRI_ANGLE:-0.5}"                  # 官方 1.5(度)
+else
+    SIFT_PEAK=0.00667; SIFT_FEATURES=8192
+    MATCH_RATIO=0.8; MATCH_DISTANCE=0.7; TWO_VIEW_INLIERS=15
+    INIT_INLIERS=100; ABS_INLIERS=30; ABS_RATIO=0.25
+    FILTER_REPROJ=4; TRI_ANGLE=1.5
+fi
+
 # OpenMVS 稠密重建
 RESOLUTION_LEVEL="${RESOLUTION_LEVEL:-1}"  # 越大越快越糊
 MAX_RESOLUTION="${MAX_RESOLUTION:-2000}"
@@ -55,6 +76,7 @@ if [[ $# -lt 1 ]]; then
     echo "  FPS=$FPS                 每秒抽帧数(仅视频输入)"
     echo "  MAX_WIDTH=$MAX_WIDTH           图像最大宽度(仅视频输入)"
     echo "  MATCHER=$MATCHER        exhaustive | sequential"
+    echo "  COLMAP_RELAXED=$COLMAP_RELAXED          1=放宽注册阈值(默认), 0=COLMAP 官方值"
     echo "  RESOLUTION_LEVEL=$RESOLUTION_LEVEL      稠密重建降采样层级(0=全分辨率,最大=最快)"
     echo "  DO_REFINE=$DO_REFINE              1=做网格细化, 0=跳过"
     echo "  FORCE=1                  强制重跑已完成步骤"
@@ -195,6 +217,8 @@ else
         --ImageReader.single_camera 1 \
         --FeatureExtraction.use_gpu 0 \
         --FeatureExtraction.max_image_size "$MAX_RESOLUTION" \
+        --SiftExtraction.max_num_features "$SIFT_FEATURES" \
+        --SiftExtraction.peak_threshold "$SIFT_PEAK" \
         "${THREAD_ARG[@]}"
     timer_end
 fi
@@ -204,12 +228,18 @@ if done_marker "$WORK/.matched"; then
     echo "  已跳过"
 else
     timer_start
+    MATCH_ARGS=(
+        --FeatureMatching.use_gpu 0
+        --SiftMatching.max_ratio "$MATCH_RATIO"
+        --SiftMatching.max_distance "$MATCH_DISTANCE"
+        --TwoViewGeometry.min_num_inliers "$TWO_VIEW_INLIERS"
+    )
     case "$MATCHER" in
         exhaustive)  colmap exhaustive_matcher \
                          --database_path "$WORK/db.db" \
-                         --FeatureMatching.use_gpu 0 ;;
+                         "${MATCH_ARGS[@]}" ;;
         sequential)  colmap sequential_matcher --database_path "$WORK/db.db" \
-                         --FeatureMatching.use_gpu 0 \
+                         "${MATCH_ARGS[@]}" \
                          --SequentialMatching.overlap "$SEQUENTIAL_OVERLAP" ;;
         vocabtree)   echo "错误:vocabtree 模式需要额外的 vocab tree 文件,请改用 exhaustive 或 sequential"
                      exit 1 ;;
@@ -229,24 +259,34 @@ else
     colmap mapper \
         --database_path "$WORK/db.db" \
         --image_path "$IMG" \
-        --output_path "$SPARSE"
+        --output_path "$SPARSE" \
+        --Mapper.init_min_num_inliers "$INIT_INLIERS" \
+        --Mapper.abs_pose_min_num_inliers "$ABS_INLIERS" \
+        --Mapper.abs_pose_min_inlier_ratio "$ABS_RATIO" \
+        --Mapper.filter_max_reproj_error "$FILTER_REPROJ" \
+        --Mapper.tri_min_angle "$TRI_ANGLE"
     timer_end
 fi
 
-# 取注册图像最多的那个子模型
+# 取注册图像最多的那个子模型。
+# images.bin 的第一个 uint64 就是注册图像数(不是第一张图的 id)。
+BEST_SPARSE="$SPARSE/0"
 if [[ -d "$SPARSE/1" ]]; then
     best=$(for d in "$SPARSE"/*/; do
              n=$(python -c "
-import struct,sys,os
+import struct,os
 p=os.path.join('$d','images.bin')
 try:
-    f=open(p,'rb'); f.read(8); print(struct.unpack('<Q',f.read(8))[0])
-except Exception: print(0)
+    with open(p,'rb') as f:
+        print(struct.unpack('<Q', f.read(8))[0])
+except Exception:
+    print(0)
 " 2>/dev/null || echo 0)
-             echo "$n $d"
+             echo "$n ${d%/}"
            done | sort -rn | head -1 | awk '{print $2}')
-    if [[ "$best" != "$SPARSE/0/" && -n "$best" ]]; then
-        echo "  注意:检测到多个子模型,选用图像最多的: $best"
+    if [[ -n "$best" && "$best" != "$SPARSE/0" ]]; then
+        BEST_SPARSE="$best"
+        echo "  注意:检测到多个子模型,选用注册图像最多的: $BEST_SPARSE"
         echo "  (其余子模型保留在 $SPARSE 下)"
     fi
 fi
@@ -260,7 +300,7 @@ else
     mkdir -p "$DENSE"
     colmap image_undistorter \
         --image_path "$IMG" \
-        --input_path "$SPARSE/0" \
+        --input_path "$BEST_SPARSE" \
         --output_path "$DENSE" \
         --output_type COLMAP
     timer_end

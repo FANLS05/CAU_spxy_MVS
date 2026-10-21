@@ -288,12 +288,24 @@ def _find_front(poses, front_image):
 
 def select_views(poses, view_types=("front", "left", "right", "back"),
                  front_image=None, max_error=45.0, swap_left_right=False,
-                 strict=False, min_coverage=0.0):
-    """穷举 front 候选 + 其余视角的排列,返回误差最小的一组。
+                 strict=False, min_coverage=0.0, size_weight=15.0,
+                 border_penalty=0.5):
+    """穷举 front 候选 + 其余视角的排列,选「角度准 + 图大且完整」的一组。
+
+    打分不再只看方位误差,而是
+
+        cost = 方位 RMS(度) + size_weight × (1 - 平均图片质量)
+
+    图片质量 q ∈ [0, 1]:
+      - 目标在原始照片里的像素占比 / 本组最大值(越"大"越好);
+      - 目标贴到画面边缘(touches_border)时再乘 (1 - border_penalty),
+        因为被裁掉一部分的照片"不完整"。
+    size_weight 的单位是度:默认 15 表示「面积翻倍 ≈ 抵 7.5° 方位误差」。
+    没有 report.json(比如直接拿原图)时所有 q 都取 0.5,退化成纯角度选择。
 
     返回 (front_pose, assignment, info)
       assignment: {view_type: pose}
-      info: rms/max error、warning
+      info: rms/max error、cost、平均质量、warning
     """
     types = [t.strip() for t in view_types if t.strip()]
     if "front" not in types:
@@ -308,9 +320,21 @@ def select_views(poses, view_types=("front", "left", "right", "back"),
     cands = [
         p for p in poses
         if p.get("az") is not None
-        and p.get("coverage", 0.0) >= min_coverage
+        # 没有 report.json 时(直接拿原图)不知道覆盖率,不能让 --min-coverage
+        # 把所有图都筛掉
+        and (p.get("coverage", 0.0) >= min_coverage or not p.get("has_report"))
         and p.get("path")
     ]
+    max_cov = max((p.get("coverage", 0.0) for p in cands), default=0.0)
+
+    def quality(p):
+        if not p.get("has_report"):
+            return 0.5
+        q = (p.get("coverage", 0.0) / max_cov) if max_cov > 0 else 0.0
+        if p.get("touches_border"):
+            q *= max(0.0, 1.0 - border_penalty)
+        return q
+
     if len(cands) < len(types):
         raise SystemExit(
             f"可用图片 {len(cands)} 张,不够 {len(types)} 个视角;"
@@ -359,8 +383,12 @@ def select_views(poses, view_types=("front", "left", "right", "back"),
             if not ok:
                 continue
 
-            cov = sum(p.get("coverage", 0.0) for p in [f] + list(assign.values()) + list(tb_assign.values()))
-            score = (round(rms, 6), round(mx, 6), -round(cov, 9))
+            chosen = [f] + list(assign.values()) + list(tb_assign.values())
+            cov = sum(p.get("coverage", 0.0) for p in chosen)
+            mean_q = sum(quality(p) for p in chosen) / len(chosen)
+            # 角度(度)和图片质量折算到同一个量纲:q 每低 1,罚 size_weight 度
+            cost = rms + size_weight * (1.0 - mean_q)
+            score = (round(cost, 6), round(rms, 6), -round(cov, 9))
             if best is None or score < best["score"]:
                 best = {
                     "score": score,
@@ -370,6 +398,8 @@ def select_views(poses, view_types=("front", "left", "right", "back"),
                     "tb_errors": tb_errors,
                     "rms": rms,
                     "max": mx,
+                    "cost": cost,
+                    "mean_quality": mean_q,
                 }
 
     if best is None:
@@ -394,9 +424,13 @@ def select_views(poses, view_types=("front", "left", "right", "back"),
         if strict:
             raise SystemExit(warning)
     best["warning"] = warning
+    for p in poses:
+        p["quality"] = quality(p)
     return best["front"], {"front": best["front"], **best["assign"], **best["tb"]}, {
         "rms": best["rms"],
         "max": best["max"],
+        "cost": best["cost"],
+        "mean_quality": best["mean_quality"],
         "errors": best["errors"],
         "tb_errors": best["tb_errors"],
         "warning": warning,
@@ -422,7 +456,12 @@ def _find_image(cutouts_dir, images_dir, stem):
     return None, None
 
 
-def _load_coverage(cutouts_dir):
+def _load_report(cutouts_dir):
+    """读 mask_cutout.py 的 report.json:每张图的占比 + 是否贴边。
+
+    返回 {stem: {"coverage": float, "touches_border": bool}}。
+    没有 report.json(例如直接拿原图)时返回空,选择器会退化成纯角度。
+    """
     if not cutouts_dir:
         return {}
     p = os.path.join(cutouts_dir, "report.json")
@@ -431,7 +470,13 @@ def _load_coverage(cutouts_dir):
     try:
         with open(p, encoding="utf-8") as f:
             rep = json.load(f)
-        return {o["stem"]: float(o.get("coverage", 0.0)) for o in rep.get("outputs", [])}
+        return {
+            o["stem"]: {
+                "coverage": float(o.get("coverage", 0.0)),
+                "touches_border": bool(o.get("touches_border", False)),
+            }
+            for o in rep.get("outputs", [])
+        }
     except Exception:  # noqa: BLE001
         return {}
 
@@ -449,7 +494,8 @@ def resolve(model_dir, cutouts=None, labels=None, cloud=None, center=None,
             class_id=1, min_conf=None, npz=None, up="auto", plane_threshold=None,
             view_types=("front", "left", "right", "back"), front_image=None,
             max_error=45.0, swap_left_right=False, strict=False,
-            min_coverage=0.0, allow_raw=True, quiet=False):
+            min_coverage=0.0, allow_raw=True, quiet=False,
+            size_weight=15.0, border_penalty=0.5):
     """主入口:返回 selection 字典,里面的 pose 已带 path/source。"""
     model_dir = os.path.abspath(model_dir)
     dft = default_paths(model_dir)
@@ -459,27 +505,35 @@ def resolve(model_dir, cutouts=None, labels=None, cloud=None, center=None,
     cloud = cloud or dft["cloud"]
 
     poses = read_poses(model_dir)
+    cutouts_is_raw = False
     if not os.path.isdir(cutouts):
         if allow_raw and os.path.isdir(images_dir):
             print(f"⚠️  抠图目录不存在:{cutouts};退回原图 {images_dir}(背景会进模型)")
             cutouts = images_dir
+            cutouts_is_raw = True
         else:
             raise SystemExit(
                 f"抠图目录不存在:{cutouts}\n"
                 "先跑 mask_cutout.py,或用 --cutouts 指定目录"
             )
 
-    coverage = _load_coverage(cutouts)
+    report = _load_report(cutouts)
     missing = []
     for p in poses:
         stem = os.path.splitext(os.path.basename(p["name"]))[0]
-        path, src = _find_image(cutouts, images_dir if allow_raw else None, stem)
+        # 抠图目录存在时,某张图没有该物体的抠图 = 这张图里没检测到它,
+        # 不能退回原图顶替(那会把背景和别的物体带进模型)。
+        raw_lookup = images_dir if (allow_raw and cutouts_is_raw) else None
+        path, src = _find_image(cutouts, raw_lookup, stem)
         if path is None:
             missing.append(p["name"])
             continue
         p["path"] = path
         p["source"] = src
-        p["coverage"] = coverage.get(stem, 0.0)
+        info = report.get(stem)
+        p["coverage"] = info["coverage"] if info else 0.0
+        p["touches_border"] = info["touches_border"] if info else False
+        p["has_report"] = info is not None
     if missing:
         print(f"⚠️  这些图找不到对应文件,不参与选择:{', '.join(missing)}")
 
@@ -530,6 +584,7 @@ def resolve(model_dir, cutouts=None, labels=None, cloud=None, center=None,
         poses, view_types=view_types, front_image=front_image,
         max_error=max_error, swap_left_right=swap_left_right,
         strict=strict, min_coverage=min_coverage,
+        size_weight=size_weight, border_penalty=border_penalty,
     )
 
     out_views = []
@@ -560,6 +615,8 @@ def resolve(model_dir, cutouts=None, labels=None, cloud=None, center=None,
             "error_deg": None if err is None else float(err),
             "elevation_deg": None if p.get("elev") is None else float(p["elev"]),
             "coverage": float(p.get("coverage", 0.0)),
+            "touches_border": bool(p.get("touches_border", False)),
+            "quality": round(float(p.get("quality", 0.0)), 4),
         })
 
     selection = {
@@ -576,6 +633,10 @@ def resolve(model_dir, cutouts=None, labels=None, cloud=None, center=None,
         "front_azimuth_deg": float(front["az"]),
         "rms_error_deg": float(info["rms"]),
         "max_error_deg": float(info["max"]),
+        "cost": float(info["cost"]),
+        "mean_quality": float(info["mean_quality"]),
+        "size_weight": float(size_weight),
+        "border_penalty": float(border_penalty),
         "warning": info["warning"],
         "views": out_views,
     }
@@ -587,19 +648,24 @@ def print_selection(sel, stream=sys.stdout):
     print(f"up         {np.round(sel['up'], 4)}  [{sel['up_source']}]", file=stream)
     print(f"物体中心   {np.round(sel['center'], 4)}  [{sel['center_source']}]", file=stream)
     print(f"前视方位   {sel['front_azimuth_deg']:.1f}°", file=stream)
-    print(f"误差       RMS {sel['rms_error_deg']:.1f}°, max {sel['max_error_deg']:.1f}°",
+    print(f"误差       RMS {sel['rms_error_deg']:.1f}°, max {sel['max_error_deg']:.1f}°"
+          f"  | 综合代价 {sel.get('cost', 0.0):.1f}"
+          f"(图片质量 {sel.get('mean_quality', 0.0):.2f})",
           file=stream)
     if sel.get("warning"):
         print(f"⚠️  {sel['warning']}", file=stream)
     print("", file=stream)
-    print(f"{'视角':<11}{'相对front':>10}{'误差':>8}{'俯仰':>8}{'覆盖率':>8}  图片", file=stream)
+    print(f"{'视角':<11}{'相对front':>10}{'误差':>8}{'俯仰':>8}{'覆盖率':>8}{'质量':>7}  图片",
+          file=stream)
     for v in sel["views"]:
         rel = "-" if v["relative_to_front_deg"] is None else f"{v['relative_to_front_deg']:+.1f}°"
         err = "-" if v["error_deg"] is None else f"{v['error_deg']:.1f}°"
         elev = "-" if v["elevation_deg"] is None else f"{v['elevation_deg']:.1f}°"
+        tag = " *贴边" if v.get("touches_border") else ""
         print(
             f"{v['view_type']:<11}{rel:>10}{err:>8}{elev:>8}"
-            f"{100 * v['coverage']:>7.2f}%  {os.path.basename(v['path'])}",
+            f"{100 * v['coverage']:>7.2f}%{v.get('quality', 0.0):>7.2f}  "
+            f"{os.path.basename(v['path'])}{tag}",
             file=stream,
         )
 
@@ -704,6 +770,11 @@ def main():
                     help="交换 left/right(不同数据集的左右约定可能相反)")
     ap.add_argument("--min-coverage", type=float, default=0.0,
                     help="mask 覆盖率低于此值的图不参与;0.01 = 1%%")
+    ap.add_argument("--size-weight", type=float, default=15.0,
+                    help="图片大小的权重(折合成方位角,单位:度),默认 15;"
+                         "0=只看角度,越大越偏向目标占比大、完整的照片")
+    ap.add_argument("--border-penalty", type=float, default=0.5,
+                    help="目标贴到画面边缘时质量打折的比例,默认 0.5(打五折)")
     ap.add_argument("--no-raw-fallback", action="store_true",
                     help="找不到抠图就不要退回原图")
     ap.add_argument("--out", default=None, help="选择结果 json 路径")
@@ -720,6 +791,7 @@ def main():
         max_error=args.max_error, swap_left_right=args.swap_left_right,
         strict=args.strict, min_coverage=args.min_coverage,
         allow_raw=not args.no_raw_fallback,
+        size_weight=args.size_weight, border_penalty=args.border_penalty,
     )
     print_selection(sel)
     if args.out:
