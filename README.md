@@ -1,5 +1,20 @@
 # 倾斜摄影三维重建 + 点云语义分割
 
+<p align="center">
+  <img src="demo_pic/13f3b3df1e77e8bb720e4de63ee99905.jpg" width="49%" alt="输入照片：黑色保温杯和白色纸杯">
+  <img src="demo_pic/0af55a1f99c1d31913b72405acd464aa.png" width="49%" alt="配准结果：两个杯子的点云与生成模型叠加，顶部是相机位姿">
+</p>
+<p align="center">
+  左：输入照片（黑杯 + 白杯） · 右：配准结果（青 = 黑杯点云，橙 = 白杯点云，黄色四棱锥 = 相机）
+</p>
+<p align="center">
+  <img src="demo_pic/6b9bde88dbc636e9fadb322ceee27e2d.png" width="49%" alt="24 张照片的相机位姿与重建点云">
+  <img src="demo_pic/b5e2373a55f06b9aca4baf2ee469cf95.png" width="49%" alt="黑色保温杯的分割点云特写">
+</p>
+<p align="center">
+  左：相机位姿（每张照片一个四棱锥） · 右：黑杯分割特写（青色 = 类别 1 的点）
+</p>
+
 从一组照片出发：
 
 ```
