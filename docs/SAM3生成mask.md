@@ -270,9 +270,11 @@ $py = "C:\Users\FANLS\.conda\envs\basic_env\python.exe"
 | `--limit N` | — | 只处理前 N 张 |
 | `--overwrite` | 关 | 重跑已存在的(默认跳过,断点续跑) |
 | `--no-write-empty` | 关 | 什么都没检测到的图不写 png(默认照写全 0 的) |
-| `--overlay-dir DIR` | — | 半透明叠加图,肉眼验收 |
+| `--overlay-dir DIR` | — | 半透明叠加图,肉眼验收;**默认不写** |
 | `--save-json PATH` | — | 统计(每图每概念的像素数/实例数/重叠数) |
 | `--selftest` | 关 | 纯合成自检,不需要模型和 GPU |
+
+默认只写 mask,不写叠加图;要肉眼验收时显式加 `--overlay-dir`。
 
 ### 颜色
 
