@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>岩壁裂隙检测</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css?v=2">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three.module.js",
+    "three/addons/": "/static/vendor/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo"></span>
+      <div>
+        <h1>岩壁裂隙检测</h1>
+        <p>照片 → 点云 → 裂隙高亮</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <label class="scene-pick">
+        <span>场景</span>
+        <select id="sceneSelect"></select>
+      </label>
+      <button id="refreshScenes" class="ghost" title="刷新场景列表">刷新</button>
+      <span id="jobChip" class="chip idle">空闲</span>
+    </div>
+  </header>
+
+  <aside id="left" class="panel">
+    <section class="block">
+      <h2>重建 <span class="hint">从照片开始</span></h2>
+      <label class="field">
+        <span>照片文件夹</span>
+        <div class="row">
+          <input id="photosDir" type="text" placeholder="D:\data\rock 或 work\rock\dense\images">
+          <button id="browsePhotos" class="ghost small">浏览</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>场景名</span>
+        <input id="newScene" type="text" placeholder="rock2">
+      </label>
+      <details class="adv">
+        <summary>重建参数(高级)</summary>
+        <div class="field">
+          <span>特征匹配</span>
+          <div class="seg" id="matcherSeg">
+            <button data-value="exhaustive" class="on" title="两两匹配,最准但最慢">exhaustive</button>
+            <button data-value="sequential" title="按拍摄顺序匹配,快,适合视频抽帧">sequential</button>
+          </div>
+        </div>
+        <div class="field">
+          <span>COLMAP 注册阈值</span>
+          <div class="seg" id="relaxedSeg">
+            <button data-value="1" class="on" title="更宽松,弱纹理/小目标更容易重建">放宽</button>
+            <button data-value="0" title="COLMAP 官方默认值,更严格">官方</button>
+          </div>
+        </div>
+        <div class="two">
+          <label class="field" title="OpenMVS 稠密重建降采样层级:0=全分辨率(最细最慢),1=默认,越大越快越糊">
+            <span>稠密层级</span>
+            <input id="resLevel" type="number" min="0" max="3" step="1" value="1">
+          </label>
+          <label class="field" title="特征提取 / 稠密重建使用的最大图像边长,越大越细也越慢">
+            <span>最大边长</span>
+            <input id="maxRes" type="number" min="640" step="100" value="2000">
+          </label>
+        </div>
+        <label class="check" title="RefineMesh 细化网格,慢但细节更好">
+          <input id="doRefine" type="checkbox" checked> 网格细化(RefineMesh)
+        </label>
+        <div class="field">
+          <span>网格精度</span>
+          <div class="seg" id="meshSeg">
+            <button data-value="standard" class="on" title="点距 1.5px,RefineMesh 最大面面积 16">标准</button>
+            <button data-value="fine" title="点距 0.75px,最大面面积 8,面数约翻倍">精细</button>
+            <button data-value="ultra" title="点距 0.5px,最大面面积 4,2 代细化,最细也最慢。网格超过 400 万面时 RefineMesh 会自动跳过(32GB 内存不够)">极细</button>
+          </div>
+        </div>
+        <label class="check" title="只重跑 ReconstructMesh / RefineMesh / TextureMesh,复用已有的稀疏和稠密点云(省掉最慢的稠密重建)">
+          <input id="meshOnly" type="checkbox"> 只重做网格(复用稠密点云)
+        </label>
+      </details>
+      <label class="check"><input id="forceRecon" type="checkbox"> 强制重跑已完成的步骤</label>
+      <button id="btnReconstruct" class="primary wide">开始重建</button>
+      <p class="note">调用 run_pipeline.sh:COLMAP → OpenMVS。已有场景可直接跳过这一步。改了 COLMAP/稠密参数必须勾选「强制重跑」;只改「网格精度」勾「只重做网格」即可,不用重跑稠密。稠密层级和最大边长对网格细节的影响通常比网格精度更大。</p>
+    </section>
+
+    <section class="block">
+      <h2>裂隙检测</h2>
+      <div class="field" title="可多选:每个模型各检测一遍,分别保存为一条检测记录">
+        <span>模型 <em>可多选,每个模型一条记录</em></span>
+        <div class="model-grid" id="modelGrid">
+          <label><input type="checkbox" value="tom" checked> seed101</label>
+          <label><input type="checkbox" value="tom202"> seed202</label>
+          <label><input type="checkbox" value="tom303"> seed303</label>
+          <label><input type="checkbox" value="tom404"> seed404</label>
+          <label><input type="checkbox" value="tom505"> seed505</label>
+          <label><input type="checkbox" value="dihao"> CrackEvo</label>
+          <label><input type="checkbox" value="segformer"> SegFormer-b0</label>
+          <label><input type="checkbox" value="ensemble"> 集成</label>
+        </div>
+      </div>
+      <div class="field">
+        <span>精度</span>
+        <div class="seg" id="modeSeg">
+          <button data-value="fast" class="on">快速档</button>
+          <button data-value="fine">原生分块</button>
+        </div>
+      </div>
+      <div class="field">
+        <span>推理设备</span>
+        <div class="seg" id="deviceSeg">
+          <button data-value="gpu" class="on" title="需要 onnxruntime-gpu + cuDNN;不可用时自动退回 CPU">GPU</button>
+          <button data-value="cpu" title="纯 CPU 推理">CPU</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>只检测前 N 张 <em>(留空=全部)</em></span>
+        <input id="limitInput" type="number" min="1" step="1" placeholder="全部">
+      </label>
+      <label class="check"><input id="galleryCheck" type="checkbox" checked> 生成 2D 叠加预览图</label>
+      <button id="btnDetect" class="primary wide">开始检测</button>
+      <p class="note">每次检测都会新建一条记录,不会覆盖之前的结果。快速档把整图缩到 1024 推理;原生分块保留细裂缝,但慢 10~20 倍。</p>
+    </section>
+
+    <section class="block">
+      <h2>检测记录 <span class="hint">每次检测一条</span></h2>
+      <div id="runList" class="run-list"></div>
+      <p class="note">点一条记录切换查看,分析/导出都作用在当前记录上;右侧「改名」按钮可重命名。名字默认是检测开始时间。</p>
+    </section>
+
+    <section class="block">
+      <h2>显示</h2>
+      <div class="field">
+        <span>显示对象</span>
+        <div class="seg" id="displaySeg">
+          <button data-value="points" class="on">点云</button>
+          <button data-value="mesh">网格</button>
+        </div>
+      </div>
+      <div class="field">
+        <span>网格细节</span>
+        <div class="seg" id="meshDetailSeg">
+          <button data-value="std" class="on" title="约 45 万面,秒开">标准</button>
+          <button data-value="high" title="约 150 万面,首次生成约半分钟">精细</button>
+          <button data-value="ultra" title="约 400 万面,首次生成 1~2 分钟,需要独立显卡">超细</button>
+          <button data-value="full" title="原始面数(rock 1120 万),首次生成数分钟,浏览器和显卡压力较大">原始</button>
+          <button data-value="tex" title="用 OpenMVS 的贴图(16 张 8192² 降到 4096²),面数不降采样;首次生成约 1 分钟">贴图</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>置信度阈值 <output id="thrOut">0.40</output></span>
+        <input id="threshold" type="range" min="0" max="1" step="0.01" value="0.4">
+      </label>
+      <label class="field">
+        <span>点大小 <output id="sizeOut">0.30</output></span>
+        <input id="pointSize" type="range" min="0.08" max="2" step="0.02" value="0.3">
+      </label>
+      <label class="field">
+        <span>背景亮度 <output id="dimOut">0.55</output></span>
+        <input id="dim" type="range" min="0.05" max="1" step="0.05" value="0.55">
+      </label>
+      <label class="check" title="关闭后隐藏裂隙高亮,只看原始点云/网格贴图"><input id="showCracks" type="checkbox" checked> 显示裂隙</label>
+      <label class="check" title="把每条裂隙的中心线折线画出来(需要先「分析并导出」)"><input id="showLines" type="checkbox"> 显示裂隙线</label>
+      <label class="field" title="裂隙线在屏幕上的宽度(像素)">
+        <span>裂隙线粗细 <output id="lineWOut">3.0</output></span>
+        <input id="lineWidth" type="range" min="1" max="8" step="0.5" value="3">
+      </label>
+      <label class="check"><input id="heatmap" type="checkbox" checked> 热力图着色</label>
+      <label class="check"><input id="onlyCracks" type="checkbox"> 只显示裂隙点</label>
+      <button id="btnResetView" class="ghost wide">重置视角</button>
+      <p class="note" id="scoreNote">阈值直接作用在逐点分数上,拖动即时重绘。网格细节只影响预览,不影响导出的原始 PLY。</p>
+    </section>
+
+    <section class="block">
+      <h2>分析 / 导出</h2>
+      <div class="two">
+        <label class="field"><span>最短长度</span><input id="minLength" type="number" step="0.001" placeholder="自动"></label>
+        <label class="field"><span>连接半径</span><input id="gapInput" type="number" step="0.001" placeholder="自动"></label>
+      </div>
+      <label class="field">
+        <span>比例尺 (米 / model unit) <em>可选</em></span>
+        <input id="scaleInput" type="number" step="0.000001" placeholder="未知就留空">
+      </label>
+      <button id="btnAnalyze" class="accent wide">分析并导出</button>
+      <div id="outputs" class="outputs"></div>
+      <div id="meshOutputs" class="outputs"></div>
+      <p class="note">导出:全点云高亮 PLY、纯裂隙 PLY、CSV、JSON,以及重建生成的原始网格 PLY。长度/宽度单位是重建单位。</p>
+    </section>
+  </aside>
+
+  <main id="viewport">
+    <canvas id="canvas"></canvas>
+    <div id="stats" class="stats">
+      <div><b id="statPoints">—</b><span id="statPointsLabel">显示点</span></div>
+      <div><b id="statCracks">—</b><span>高亮点</span></div>
+      <div><b id="statScene">—</b><span>场景</span></div>
+    </div>
+    <div id="emptyHint" class="empty-hint">
+      <h3>还没有可显示的点云</h3>
+      <p>在左侧从照片重建,或选择一个已完成的场景。</p>
+    </div>
+    <div class="view-help">左键旋转 · 中键平移 · 滚轮缩放</div>
+    <div id="highlightBar" class="highlight-bar hidden">
+      正在高亮裂隙 <b id="hlId">—</b>
+      <button id="clearHighlight" class="ghost small">取消</button>
+    </div>
+  </main>
+
+  <aside id="right" class="panel">
+    <div class="tabs">
+      <button id="tabCracks" class="tab on">裂隙列表 <span id="crackCount">0</span></button>
+      <button id="tabGallery" class="tab">2D 叠加图 <span id="galleryCount">0</span></button>
+    </div>
+    <div id="paneCracks" class="pane">
+      <div class="table-wrap">
+        <table id="crackTable">
+          <thead>
+            <tr><th>#</th><th>长度</th><th>宽度</th><th>走向°</th><th>点</th><th>置信</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="tableEmpty" class="note center">检测完成后点「分析并导出」生成裂隙列表。</p>
+    </div>
+    <div id="paneGallery" class="pane hidden">
+      <div id="galleryGrid" class="gallery-grid"></div>
+      <p id="galleryEmpty" class="note center">检测时勾选「生成 2D 叠加预览图」后,这里会出现每张图的检测结果。</p>
+    </div>
+  </aside>
+
+  <footer id="logPanel">
+    <div class="log-head">
+      <span id="logTitle">任务日志</span>
+      <div class="log-tools">
+        <div class="progress"><i id="progressBar"></i></div>
+        <span id="progressText"></span>
+        <button id="btnStop" class="ghost small" disabled>停止</button>
+        <button id="btnClearLog" class="ghost small">清空</button>
+      </div>
+    </div>
+    <pre id="log"></pre>
+  </footer>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="modalTitle">选择文件夹</h3>
+      <button id="modalClose" class="ghost small">关闭</button>
+    </div>
+    <div class="modal-path" id="modalPath">—</div>
+    <div class="modal-actions">
+      <button id="modalUp" class="ghost small">上一级</button>
+      <button id="modalPick" class="primary small">选择此文件夹</button>
+    </div>
+    <div id="modalList" class="modal-list"></div>
+  </div>
+</div>
+
+<div id="lightbox" class="lightbox hidden">
+  <div class="lightbox-head">
+    <span id="lightboxName"></span>
+    <div class="seg small">
+      <button id="lbOverlay" class="on">叠加</button>
+      <button id="lbProb">概率</button>
+    </div>
+    <button id="lightboxClose" class="ghost small">关闭</button>
+  </div>
+  <img id="lightboxImg" alt="">
+</div>
+
+<script type="module" src="/static/app.js?v=3"></script>
+</body>
+</html>

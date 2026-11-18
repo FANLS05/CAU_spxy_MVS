@@ -44,20 +44,52 @@
 
 ---
 
+## 岩壁裂隙检测应用（新增）
+
+<p align="center">
+  <img src="demo_pic/crack_app.jpg" width="92%" alt="岩壁裂隙检测 Web 界面">
+</p>
+
+`tools/crack_app/` 是课程项目的最终应用：输入一组照片 → 重建点云 → 用预训练 UNet
+识别 2D 裂缝 → 按相机位姿投影回点云 → 在浏览器里调阈值、在**点云 / 网格**之间切换查看、
+查看每条裂隙的长度/宽度/走向 → 导出高亮 PLY、纯裂隙 PLY、**裂隙中心线 PLY**、CSV、JSON 和原始网格 PLY。
+
+```powershell
+cd D:\code\point_cloud\0916
+& C:\Users\FANLS\.conda\envs\basic_env\python.exe tools\crack_app\server.py
+# 打开 http://127.0.0.1:8765
+```
+
+- 检测默认走 GPU（`onnxruntime-gpu` + CUDA 12 / cuDNN 9，RTX 5070 Ti sm_120 实测可用），不可用时自动退回 CPU；界面里可切 GPU / CPU。
+- 模型：Tomt996 五个训练种子（UAV 岩壁裂缝，MIT）、CrackEvo（实验室断裂，MIT）、SegFormer-b0（MIT 基座，本地研究用）以及 Tomt996+CrackEvo 集成，全部走 ONNX Runtime；检测时可**多选**，每个模型各存一条检测记录，方便对比。
+- 每次检测保存为一条「检测记录」，默认名字是检测开始时间，可在列表里改名、切换；每条记录各自分析、导出到 `out/<场景>/<记录>/`，互不覆盖。
+- 快速档整图缩到 1024；原生分块保留细裂缝，单张 9524×6338：CPU 约 28 s，GPU 约 5.5 s。
+- 阈值滑杆直接作用在 GPU shader 上，拖动即时重绘；点表格行会高亮整条裂隙。
+- 「显示对象」可在点云和网格间切换；网格细节分 标准 45 万 / 精细 150 万 / 超细 400 万 / 原始 四档（首次选档时做体素聚类降采样并缓存，rock 1120 万面约 8 s ~ 数分钟），另有**贴图**档：直接用 OpenMVS TextureMesh 的 16 张 8192² 图集（降到 4096² JPEG），不降采样，第一次约 1 分钟；裂隙仍以点云叠加在网格上；可下载未降采样的原始网格 PLY。
+- 分析时会把每条裂隙的点云压成中心线折线（体素图直径 + 平滑），可勾选「显示裂隙线」（线宽 1~8 px 可调）在三维里查看，并导出 `*_lines.ply/json/csv`。
+- 检测、重建、分析、网格准备都在底部显示进度条（逐图 / 逐步骤 / 分阶段）。
+- 重建参数（特征匹配、COLMAP 阈值、稠密层级、最大边长、网格细化、网格精度）可在界面直接改，改完勾「强制重跑」生效；只改网格精度时勾「只重做网格」即可复用稠密点云。
+- 完整参数、产物格式、HTTP 接口和排错见 **[docs/岩隙检测应用.md](docs/岩隙检测应用.md)**。
+
+---
+
 ## 目录结构
 
 ```
 data\<场景>\                 原始照片
 work\<场景>\                 COLMAP / OpenMVS 工作目录（中间产物，不入库）
-  dense\images\              去畸变图 ← SAM 3 的输入
-  dense\sparse\              相机内参 + 位姿 ← mask_to_points / colmap_views 的输入
+  dense\images\              去畸变图 ← SAM 3 / 裂缝检测的输入
+  dense\sparse\              相机内参 + 位姿 ← mask_to_points / crack_app 的输入
   mvs\scene_dense.ply        稠密点云
-  mvs\scene_dense_mesh.ply   网格（遮挡剔除用）
+  mvs\scene_dense_mesh.ply   网格（遮挡剔除 + 网页网格显示 / 导出）
+  crack\runs\<记录>\         每次检测的分数、显示点云、2D 叠加图（crack_app 生成）
+  crack\                     网格/贴图预览缓存、当前检测记录指针
 work\img2_3d\<JobId>\        混元图生 3D 的结果（已 gitignore）
 masks_<场景>\                SAM 3 索引 mask（可重建，不入库）
 out\                         抠图、选视角、标签、配准结果（可重建，不入库）
 demo_pic\                    README 效果图
 tools\                       重建、分割、抠图、图生 3D、配准工具
+tools\crack_app\             岩壁裂隙检测 Web 应用（检测 / 分析 / 导出）
 docs\                        详细手册
 ```
 
@@ -286,6 +318,37 @@ $mask = "$root\masks_$scene"
 不想要加 `--no-cameras`。建筑用默认 `--mode facade`，桌面独立物体加
 `--mode object --up-axis auto`。
 
+配准跑完后，**不重新算**、直接打开保存的结果：
+
+```powershell
+& $py "$root\tools\show_registered.py" `
+  --merged "$root\out\${scene}_registered.ply" `
+  --registration "$root\out\${scene}_registration.json"
+
+# 只截图，不弹窗
+& $py "$root\tools\show_registered.py" `
+  --merged "$root\out\${scene}_registered.ply" `
+  --registration "$root\out\${scene}_registration.json" `
+  --no-show --screenshot "$root\out\${scene}_registered.png"
+```
+
+它按 JSON 里的 `transform_4x4` 把模型摆回配准位置，并用保存的相机中心
+（或旁边 COLMAP 模型里的朝向）画四棱锥，不会再跑 FPFH/ICP。点太多卡顿时加
+`--voxel 0.004` 只降采样显示。
+
+检查贴合程度时，加 `--focus objects` 只看物体并自动拉近：
+
+```powershell
+& $py "$root\tools\show_registered.py" `
+  --merged "$root\out\${scene}_registered.ply" `
+  --registration "$root\out\${scene}_registration.json" `
+  --focus objects
+```
+
+默认点云严格原位，和 `register_model_to_cloud.py` 的配准窗口完全一致
+（`--display-offset` 默认 0）；只有模型把点云完全挡住时，才临时加
+`--display-offset 0.012`，它只挪显示、不改任何文件，关掉窗口后结果不变。
+
 原理、参数和实测数据见 [docs/模型与点云配准.md](docs/模型与点云配准.md)、
 [docs/图生3D.md](docs/图生3D.md)。
 
@@ -350,8 +413,9 @@ Remove-Item -Recurse -Force "$root\work\$scene" -ErrorAction SilentlyContinue
 
 - **SAM 3 的文本编码器是英文 CLIP**：中文提示基本无效，请用英文概念；`black cup` 这类带空格的
   短语比 `blackcup` 更稳。
-- **细粒度结构词不可靠**：`crevice`、`crack`、`joint` 这类岩缝/节理提示词实测几乎检不出；
-  `rock` 会返回整面岩壁。需要岩缝时得另做 2D 黑帽/脊线或点云几何凹陷检测。
+- **SAM 3 的细粒度结构词不可靠**：`crevice`、`crack`、`joint` 这类岩缝/节理提示词实测几乎检不出；
+  `rock` 会返回整面岩壁。岩缝改用 [tools/crack_app](tools/crack_app/) 的专用裂缝分割模型，
+  不再依赖 SAM 3。
 - **OpenMVS 的 CUDA 预编译包只编了 sm_89**，RTX 5070 Ti（sm_120）加载会失败，所以重建走 CPU。
 - **单航带直线飞行会失败**：相机中心共线，无法约束滚转角。需要往复式航线、环绕拍摄或高度变化。
 - **COLMAP 放宽阈值有代价**：注册图像更多，但位姿精度会略降；模型明显歪时把
@@ -363,6 +427,7 @@ Remove-Item -Recurse -Force "$root\work\$scene" -ErrorAction SilentlyContinue
 
 | 文件 | 内容 |
 |---|---|
+| **[docs/岩隙检测应用.md](docs/岩隙检测应用.md)** | **岩缝应用**：Web 界面、检测/分析参数、模型、产物格式、接口与排错 |
 | **[docs/全流程.md](docs/全流程.md)** | **推荐入口**：照片 → 重建 → 多物体分割 → 图生 3D → 配准 → 相机显示的完整命令 |
 | [docs/food完整流程.md](docs/food完整流程.md) | 从照片到带纹理模型的逐条实测流程与参数 |
 | [docs/SAM3生成mask.md](docs/SAM3生成mask.md) | SAM 3 环境、权重、mask 生成与排错 |

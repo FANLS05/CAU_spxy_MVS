@@ -26,6 +26,9 @@ work/*/mvs/scene_dense.ply
 work/*/mvs/*.log
 *.log
 
+# 裂缝检测的逐点分数 / 显示点云 / 2D 预览(可重跑)
+work/*/crack/
+
 # 保留:work/*/dense/sparse/(投影工具要的位姿)
 # 保留:work/*/mvs/ 下的 .ply / .glb / .png 成品
 
@@ -40,6 +43,9 @@ out/
 # rock 场景原图与重建产物体积过大,不发布
 data/rock/
 work/rock/
+
+# 预训练模型权重(每个约 94 MB),按 docs/岩隙检测应用.md 下载
+models/
 
 # 单图生 3D 的下载结果
 work/img2_3d/

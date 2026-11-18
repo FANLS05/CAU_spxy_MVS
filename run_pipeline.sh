@@ -66,6 +66,17 @@ MAX_THREADS="${MAX_THREADS:-0}"            # 0 = 全部核心
 # 是否做网格细化(慢,但细节更好)
 DO_REFINE="${DO_REFINE:-1}"
 
+# 网格精细度(只影响第 5~7 步,不用重跑 COLMAP/稠密)
+MESH_MIN_POINT_DISTANCE="${MESH_MIN_POINT_DISTANCE:-1.5}"  # ReconstructMesh -d,像素;越小三角面越细
+MESH_TARGET_FACES="${MESH_TARGET_FACES:-0}"                # 0=不限制(按点距自然生成)
+REFINE_SCALES="${REFINE_SCALES:-1}"                        # RefineMesh 多尺度迭代次数,越大越细越慢
+REFINE_MAX_FACE_AREA="${REFINE_MAX_FACE_AREA:-16}"         # 不细分的最大投影面积,越小越细
+# RefineMesh 内存吃得很凶:输入面数超过这个值就直接跳过细化(0=不限制),
+# 否则在 32GB 机器上会以 "OpenCV: Insufficient memory" 崩掉。
+REFINE_MAX_INPUT_FACES="${REFINE_MAX_INPUT_FACES:-4000000}"
+# MESH_FORCE=1: 只重跑网格/纹理(复用已有稀疏+稠密),适合只改网格参数
+MESH_FORCE="${MESH_FORCE:-0}"
+
 # ---------------------------------------------------------------------------
 # 参数解析
 # ---------------------------------------------------------------------------
@@ -79,6 +90,12 @@ if [[ $# -lt 1 ]]; then
     echo "  COLMAP_RELAXED=$COLMAP_RELAXED          1=放宽注册阈值(默认), 0=COLMAP 官方值"
     echo "  RESOLUTION_LEVEL=$RESOLUTION_LEVEL      稠密重建降采样层级(0=全分辨率,最大=最快)"
     echo "  DO_REFINE=$DO_REFINE              1=做网格细化, 0=跳过"
+    echo "  MESH_MIN_POINT_DISTANCE=$MESH_MIN_POINT_DISTANCE  网格三角化最小点距(像素,越小越细)"
+    echo "  MESH_TARGET_FACES=$MESH_TARGET_FACES      目标面数(0=不限)"
+    echo "  REFINE_MAX_FACE_AREA=$REFINE_MAX_FACE_AREA   细化时的最大面投影面积(越小越细)"
+    echo "  REFINE_SCALES=$REFINE_SCALES             细化多尺度迭代次数"
+    echo "  REFINE_MAX_INPUT_FACES=$REFINE_MAX_INPUT_FACES  输入面数超过此值就跳过细化(0=不限)"
+    echo "  MESH_FORCE=1             只重跑网格/纹理,复用已有稠密点云"
     echo "  FORCE=1                  强制重跑已完成步骤"
     exit 1
 fi
@@ -111,6 +128,11 @@ fi
 
 export PATH="$FFMPEG_BIN:$COLMAP_BIN:$OPENMVS_BIN:$PATH"
 
+# 命令失败时打一行线索(OpenMVS 崩溃时真正的原因在它自己的 .log 里,
+# 控制台上只看到一句 OpenCV 的 terminate,退出码也可能很莫名其妙)
+BACKED_UP=()
+trap 'rc=$?; echo; echo "  ✗ 命令失败(退出码 $rc):$BASH_COMMAND"; echo "    看 $MVS 下最新的 *-*.log 找原因"; if (( ${#BACKED_UP[@]} )); then echo "    旧网格/纹理还在 $MVS/*.bak,要还原就: cd $MVS && for f in *.bak; do mv -f \"\$f\" \"\${f%.bak}\"; done"; fi' ERR
+
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
@@ -125,6 +147,13 @@ step() {
 
 # done_marker <文件>  -> 已完成则返回 0
 done_marker() { [[ "$FORCE" != "1" && -e "$1" ]]; }
+# 网格步骤用这个:改网格参数后 MESH_FORCE=1 只重跑网格/纹理
+mesh_done() { [[ "$FORCE" != "1" && "$MESH_FORCE" != "1" && -e "$1" ]]; }
+
+# 从 PLY 头里读面数(只读 ASCII 头,不碰二进制体)
+ply_face_count() {
+    awk '/^element face /{print $3; exit} /^end_header/{exit}' "$1" 2>/dev/null
+}
 
 require() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -326,6 +355,30 @@ fi
 
 cd "$MVS"
 
+# MESH_FORCE:只重跑网格/纹理,复用稠密点云。
+# 旧产物先改名成 *.bak 而不是直接删:新网格生成失败时还能用 .bak 还原,
+# 不至于像 11 月 11 日那次 RefineMesh OOM 一样把纹理全弄丢。
+if [[ "$MESH_FORCE" == "1" && -e scene_dense.ply ]]; then
+    echo
+    echo "  MESH_FORCE=1 — 旧网格/纹理改名为 *.bak,复用稠密点云 scene_dense.ply"
+    for f in scene_dense_mesh.ply scene_dense_mesh_refine.ply \
+             scene_dense_mesh_clean.ply scene_textured.ply \
+             scene_textured0.png scene_dense_texture.glb; do
+        if [[ -e "$f" ]]; then
+            mv -f "$f" "$f.bak"
+            BACKED_UP+=("$f")
+        fi
+    done
+fi
+
+# 成功后删掉 .bak;脚本中途退出时 trap 会提示怎么还原
+cleanup_backups() {
+    for f in "${BACKED_UP[@]}"; do
+        rm -f "$f.bak"
+    done
+    BACKED_UP=()
+}
+
 # ---------------------------------------------------------------------------
 # 4. 稠密点云
 # ---------------------------------------------------------------------------
@@ -349,37 +402,50 @@ fi
 #   -p scene_dense_mesh.ply  是错的 —— 那份是网格,根本不是点云,会被
 #     当成读不到而静默退回 scene_dense.mvs 里的稀疏点(6015 个),
 #     于是只得到 5 千面的粗模。正确写法是下面这样。
-step "ReconstructMesh 网格重建"
-if done_marker "$MVS/scene_dense_mesh.ply"; then
+step "ReconstructMesh 网格重建 (点距 ${MESH_MIN_POINT_DISTANCE}px)"
+if mesh_done "$MVS/scene_dense_mesh.ply"; then
     echo "  已跳过"
 else
     timer_start
+    MESH_ARGS=()
+    [[ "$MESH_TARGET_FACES" != "0" ]] && MESH_ARGS=(--target-face-num "$MESH_TARGET_FACES")
     ReconstructMesh scene_dense.mvs \
         -p scene_dense.ply \
-        -o scene_dense_mesh.ply
+        -o scene_dense_mesh.ply \
+        -d "$MESH_MIN_POINT_DISTANCE" \
+        "${MESH_ARGS[@]}"
     timer_end
 fi
 
 # ---------------------------------------------------------------------------
 # 6. 网格细化(可选)
 # ---------------------------------------------------------------------------
-if [[ "$DO_REFINE" == "1" ]]; then
-    step "RefineMesh 网格细化"
-    if done_marker "$MVS/scene_dense_mesh_refine.ply"; then
-        echo "  已跳过"
-    else
-        timer_start
-        RefineMesh scene_dense.mvs \
-            -m scene_dense_mesh.ply \
-            -o scene_dense_mesh_refine.ply \
-            --scales 1 --max-face-area 16
-        timer_end
-    fi
-    MESH_FOR_TEXTURE="scene_dense_mesh_refine.ply"
-else
+MESH_FOR_TEXTURE="scene_dense_mesh.ply"
+if [[ "$DO_REFINE" != "1" ]]; then
     echo
     echo "  (已按 DO_REFINE=0 跳过网格细化)"
-    MESH_FOR_TEXTURE="scene_dense_mesh.ply"
+else
+    IN_FACES=$(ply_face_count scene_dense_mesh.ply)
+    IN_FACES=${IN_FACES:-0}
+    if [[ "$REFINE_MAX_INPUT_FACES" != "0" && "$IN_FACES" -gt "$REFINE_MAX_INPUT_FACES" ]]; then
+        echo
+        echo "  !! 跳过 RefineMesh:输入网格 $IN_FACES 面,超过 REFINE_MAX_INPUT_FACES=$REFINE_MAX_INPUT_FACES。"
+        echo "     RefineMesh 在这个面数上会吃掉 >32GB 内存并崩在 OpenCV 分配上。"
+        echo "     继续用未细化的网格做纹理;确实要试的话把 REFINE_MAX_INPUT_FACES 设大(或 0)。"
+    else
+        step "RefineMesh 网格细化 (输入 ${IN_FACES} 面, scales ${REFINE_SCALES}, max-face-area ${REFINE_MAX_FACE_AREA})"
+        if mesh_done "$MVS/scene_dense_mesh_refine.ply"; then
+            echo "  已跳过"
+        else
+            timer_start
+            RefineMesh scene_dense.mvs \
+                -m scene_dense_mesh.ply \
+                -o scene_dense_mesh_refine.ply \
+                --scales "$REFINE_SCALES" --max-face-area "$REFINE_MAX_FACE_AREA"
+            timer_end
+        fi
+        MESH_FOR_TEXTURE="scene_dense_mesh_refine.ply"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -400,7 +466,7 @@ fi
 #   所以 main culprit 是 local,global 也顺带关掉。
 #   另一个坑:--ignore-mask-label -2(想关掉 mask)会直接段错误,别用。
 step "TextureMesh 纹理贴图"
-if done_marker "$MVS/scene_dense_texture.glb"; then
+if mesh_done "$MVS/scene_dense_texture.glb"; then
     echo "  已跳过"
 else
     timer_start
@@ -416,6 +482,13 @@ else
         --export-type glb \
         "${SEAM_OFF[@]}"
     timer_end
+fi
+
+# 全部成功,旧产物的备份可以删了
+if (( ${#BACKED_UP[@]} )); then
+    echo
+    echo "  删除旧网格/纹理备份:${BACKED_UP[*]}"
+    cleanup_backups
 fi
 
 echo

@@ -950,9 +950,14 @@ def main():
         data = {
             "registration_mode": args.mode,
             "up_axis": up_desc,
+            "rot_up_4x4": np.asarray(R_up, dtype=float).tolist(),
+            "cloud": os.path.abspath(args.cloud),
+            "labels": os.path.abspath(args.labels) if args.labels else None,
             "objects": objects,
             "note": "点云已按 up_axis 转成 Z-up;矩阵把原始模型变换到该坐标系",
         }
+        if cam_model:
+            data["colmap_model"] = os.path.abspath(cam_model)
         if len(objects) == 1:
             # 单物体保留原来的顶层字段,老脚本/文档还能直接读
             o = objects[0]
@@ -962,7 +967,13 @@ def main():
                 "balanced_fitness", "inlier_rmse")})
         if cameras:
             data["cameras"] = [
-                {"name": c["name"], "center": [float(x) for x in c["C"]]}
+                {
+                    "name": c["name"],
+                    "center": [float(x) for x in c["C"]],
+                    "forward": [float(x) for x in c["forward"]],
+                    "up": [float(x) for x in c["up"]],
+                    "right": [float(x) for x in c["right"]],
+                }
                 for c in cameras
             ]
         os.makedirs(os.path.dirname(os.path.abspath(args.save_transform)),
