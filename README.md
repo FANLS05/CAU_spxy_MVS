@@ -1,5 +1,27 @@
 # 倾斜摄影三维重建 + 点云语义分割 + 图生 3D 配准
 
+## 课程项目最终成果：岩壁裂缝三维检测
+
+从一组无人机照片出发，完成相机定位、稠密点云、网格与纹理、裂缝识别、二维到三维投影、裂缝中心线提取和网页可视化。
+
+| 环节 | 结果 |
+|---|---|
+| 输入 | 88 张 9524×6338 无人机岩壁照片 |
+| 点云 | 13,437,637 点 |
+| 网格 | 11,204,989 面 / 5,602,820 顶点 |
+| 裂缝 | 23 条（阈值 0.91），160 个折线顶点、137 段线 |
+| 模型 | Tomt996 五个训练种子、CrackEvo、SegFormer-b0，可多选对比 |
+| 界面 | 点云/网格/贴图、阈值与热力图、裂隙列表、检测记录、多格式导出 |
+
+课程论文：[Markdown 版](docs/课程论文.md) · [纯文本版](docs/课程论文.txt) · [插图说明](docs/论文插图说明.md) · [应用手册](docs/岩隙检测应用.md)
+
+<p align="center">
+  <img src="docs/figures/fig_ui_records.png" width="92%" alt="岩壁裂缝检测系统界面：多模型勾选、检测记录、三维视图与裂隙列表">
+</p>
+
+---
+
+
 <p align="center">
   <img src="demo_pic/demo_input.jpg" width="49%" alt="输入照片：黑色保温杯和白色纸杯">
   <img src="demo_pic/demo_registered.jpg" width="49%" alt="配准结果：重建点云、两个生成模型和相机位姿叠加">
@@ -423,10 +445,40 @@ Remove-Item -Recurse -Force "$root\work\$scene" -ErrorAction SilentlyContinue
 
 ---
 
+## 引用与来源
+
+**方法**
+
+- COLMAP：Schönberger J L, Frahm J M. Structure-from-Motion Revisited. CVPR, 2016. <https://colmap.github.io/>
+- OpenMVS：Cernea D. OpenMVS: Open Multi-View Stereo reconstruction library. <https://github.com/cdcseacave/openMVS>
+- U-Net：Ronneberger O, Fischer P, Brox T. U-Net. MICCAI, 2015.
+- SegFormer：Xie E, et al. SegFormer. NeurIPS, 2021.
+- 配准：Rusu R B, et al. FPFH. ICRA, 2009；Besl P J, McKay N D. ICP. IEEE TPAMI, 1992.
+- Open3D：Zhou Q Y, Park J, Koltun V. Open3D. arXiv:1801.09847. <https://www.open3d.org/>
+
+**模型**
+
+- Tomt996 / uavcrack-crack-segmentation（MIT）：<https://huggingface.co/Tomt996/uavcrack-crack-segmentation>
+- Dihao / crackevo-unet-r34（MIT）：<https://huggingface.co/Dihao/crackevo-unet-r34>
+- varcoder / segformer-b4-crack-segmentation-dataset（other，仅建议本地研究）：<https://huggingface.co/varcoder/segformer-b4-crack-segmentation-dataset>
+
+模型权重不随仓库分发（`models/` 已 gitignore），下载方式见 [docs/岩隙检测应用.md](docs/岩隙检测应用.md)。
+
+**软件**
+
+- ONNX Runtime：<https://onnxruntime.ai/>
+- FastAPI：<https://fastapi.tiangolo.com/>
+- Three.js：<https://threejs.org/>
+
+---
+
 ## 相关文档
 
 | 文件 | 内容 |
 |---|---|
+| **[docs/课程论文.md](docs/课程论文.md)** | **课程论文**：方法、实验、系统功能与参考文献 |
+| [docs/课程论文.txt](docs/课程论文.txt) | 课程论文纯文本版（无 Markdown 标记） |
+| [docs/论文插图说明.md](docs/论文插图说明.md) | 每张插图的内容、插入位置与图注 |
 | **[docs/岩隙检测应用.md](docs/岩隙检测应用.md)** | **岩缝应用**：Web 界面、检测/分析参数、模型、产物格式、接口与排错 |
 | **[docs/全流程.md](docs/全流程.md)** | **推荐入口**：照片 → 重建 → 多物体分割 → 图生 3D → 配准 → 相机显示的完整命令 |
 | [docs/food完整流程.md](docs/food完整流程.md) | 从照片到带纹理模型的逐条实测流程与参数 |

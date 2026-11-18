@@ -16,34 +16,35 @@
 　↓ 聚类、计算形状、提取中心线
 裂缝列表、高亮模型、中心线、统计表
 流程分成“重建”和“检测”两段：重建只在照片变化时做一次，检测则可以反复更换模型、阈值和参数，而不必重新计算相机位置和点云。这样既节省时间，也方便对比不同的检测方案。
-系统中的长度单位是重建单位，不是米。重建结果没有绝对尺度，只有在现场放置了已知尺寸的参照物时，才能换算成实际长度。计算在一台 Windows 工作站上完成（显卡 RTX 5070 Ti、内存 32 GB），主要软件为 COLMAP、OpenMVS、Python、ONNX Runtime、Open3D、FastAPI 和 Three.js。
+系统中的长度单位是重建单位，不是米。重建结果没有绝对尺度，只有在现场放置了已知尺寸的参照物时，才能换算成实际长度。计算在一台 Windows 工作站上完成（显卡 RTX 5070 Ti、内存 32 GB），主要软件为 COLMAP[1]、OpenMVS[2]、Python、ONNX Runtime[14]、Open3D[8]、FastAPI[12] 和 Three.js[13]。
 从照片到三维模型
 相机定位
-COLMAP 先在每张照片上提取特征点，再比较不同照片中相似的特征，找出同一处表面在多张照片中的对应关系，然后逐步推算每张照片的拍摄位置和方向，并整体优化误差。相机定位是后续所有工作的基础。
+COLMAP[1] 先在每张照片上提取特征点，再比较不同照片中相似的特征，找出同一处表面在多张照片中的对应关系，然后逐步推算每张照片的拍摄位置和方向，并整体优化误差。相机定位是后续所有工作的基础。
 岩壁表面纹理弱、重复纹理多，默认参数往往注册不上。系统放宽了特征数量和匹配门槛，例如降低特征点阈值、允许更多特征、放宽匹配的相似度要求、容许更大的定位误差。在 rock 场景的 88 张照片中，88 张全部定位成功。定位完成后，系统把原图去畸变并输出，后续所有处理都使用这批去畸变照片。
 稠密点云
-OpenMVS 根据相机位置，在相邻照片之间逐像素寻找对应点，计算每个像素的深度，再把多张照片的深度结果融合成稠密点云。系统默认使用中等精度设置（分辨率层级 1、最大图像边长 2000），rock 场景得到约 1344 万个点，点云文件约 1 GB。
+OpenMVS[2] 根据相机位置，在相邻照片之间逐像素寻找对应点，计算每个像素的深度，再把多张照片的深度结果融合成稠密点云。系统默认使用中等精度设置（分辨率层级 1、最大图像边长 2000），rock 场景得到约 1344 万个点，点云文件约 1 GB。
 把层级调到 0（全分辨率）并没有带来成比例的细节提升，耗时却明显增加，因此默认取 1。为了网页显示流畅，系统另外把点云按空间降采样到约 118 万个显示点，分析、导出仍使用全部点。
 网格与纹理
-OpenMVS 把稠密点连接成三角网格，并根据相机可见性去掉不可靠的面片。rock 场景使用最小点距 1.5 像素，得到 1120 万个面、560 万个顶点，网格文件约 213 MB，生成时内存峰值约 23.3 GB。
+OpenMVS[2] 把稠密点连接成三角网格，并根据相机可见性去掉不可靠的面片。rock 场景使用最小点距 1.5 像素，得到 1120 万个面、560 万个顶点，网格文件约 213 MB，生成时内存峰值约 23.3 GB。
 网格细化会利用照片亮度进一步细分网格，但内存消耗很大。在 32 GB 内存的机器上，对 1120 万面的网格直接细化会因内存不足而崩溃。系统因此设置了一个面数上限（400 万），超过时自动跳过细化、继续后续步骤并记录日志。实验也发现，把最小点距从 1.5 降到 0.5 并不会稳定增加有效面数，网格细节更多取决于稠密点云的精度。
 纹理阶段为每个面选择最清晰的照片，把多张照片拼成 16 张 8192 × 8192 的大图，输出版贴图 PLY（约 538 MB）和 GLB（约 341 MB），耗时约 16 分钟，内存峰值 25.33 GB。实际使用中发现，本机 OpenMVS 的“接缝匀色”功能会把面自身的纹理涂黑，必须关闭；关闭后贴图能 100% 对应到真实照片，默认只有 2.9%。
 网页端把大网格简化为 45 万、150 万、400 万和原始四档，另提供贴图档；16 张 8192 的图降为 4096 的 JPEG，并按“顶点加贴图坐标”去重后重新编号，rock 得到约 664 万个网页顶点、467 MB 缓存，构建约 61 秒。OpenMVS 的贴图原点在图像左下角，网页显示时需要保持默认的上下翻转设置，否则会采到空白区域。
 照片裂缝识别与三维对应
 裂缝分割模型
-系统通过 ONNX Runtime 加载多个预训练分割模型，它们对每张照片输出一张 0 到 1 的裂缝概率图。
+系统通过 ONNX Runtime[14] 加载多个预训练分割模型，它们对每张照片输出一张 0 到 1 的裂缝概率图。
 可用的模型如下：
 Tomt996（5 个训练种子）：ResNet34-UNet 结构，输入 672 × 378，训练数据为无人机裂缝数据集，许可为 MIT。
 CrackEvo：ResNet34-UNet 结构，输入 512 × 512，训练数据为实验室断裂与多个裂缝数据集，许可为 MIT。
 SegFormer-b0：SegFormer 结构，输入 512 × 512，训练数据为公开裂缝数据集，仅限本地研究使用。
 集成：Tomt996 与 CrackEvo 的平均结果。
+表中 Tomt996[9]、CrackEvo[10] 和 SegFormer-b0[11] 分别来自对应的开源仓库；前两者的骨干网络基于 U-Net[3]，SegFormer-b0 基于 SegFormer[4]，CrackEvo 的训练数据包含 DeepCrack[5] 等公开数据集。
 照片在输入模型前会先做归一化，使用的均值和方差与模型训练时一致。Tomt996 系列要求高度为 384，系统在 378 的切块下方补 6 行镜像像素，推理后再裁掉。
 这些模型都在大量裂缝照片上训练过，学到的是“像裂缝的纹理和边缘”。不同模型各有侧重：UNet 系列对细长裂缝更敏感，SegFormer 更关注整体形状；即使是同一结构、只换一个训练种子，结果也会有差别。因此系统保留多个模型供对比，而不是只依赖一个结果。
 推理有两种模式。快速档把整张照片的长边缩到 1024 再推理，速度快，但细裂缝会丢失；原生分块保持原分辨率，按固定大小重叠切块，块与块之间用渐变权重融合，避免拼接痕迹。单张 9524 × 6338 的照片在原生分块下，Tomt996 约需 437 块，CPU 约 28 秒、显卡约 5.5 秒；CrackEvo 约 425 块，CPU 约 29 秒、显卡约 6 秒。
 检测时还可以选择只处理前 N 张照片，并生成 2D 预览。每张照片会得到两张图：一张把裂缝涂成半透明红色叠在原图上，另一张用颜色深浅表示裂缝概率高低。前者方便确认裂缝位置，后者方便调整阈值。
 测试中还试过两个公开模型：一个 UNet 型模型会把约 19% 的岩面判成裂缝，另一个 SegFormer 几乎全部判成背景。两者的训练数据和岩壁差异太大，因此没有放进系统。这说明裂缝模型跨材质使用时必须重新评估。
 投影到三维模型
-有了相机位置，就可以把每个三维点投影到照片上，读取该处的裂缝概率。投影使用的是去畸变后的照片，相机参数直接来自 COLMAP 的结果，两者一一对应，不需要再手工标定。系统先去掉投影落在照片外、深度无效的点，然后判断这个点在照片里是否被其他表面挡住：从相机位置向该点发一条“视线”，如果视线先撞到别的表面，说明该点在这一视角不可见。遮挡判断使用网格做射线求交。
+有了相机位置，就可以把每个三维点投影到照片上，读取该处的裂缝概率。投影使用的是去畸变后的照片，相机参数直接来自 COLMAP 的结果，两者一一对应，不需要再手工标定。系统先去掉投影落在照片外、深度无效的点，然后判断这个点在照片里是否被其他表面挡住：从相机位置向该点发一条“视线”，如果视线先撞到别的表面，说明该点在这一视角不可见。遮挡判断使用网格做射线求交[8]。
 判断“是否被挡”需要容忍网格和点云之间的微小偏差。系统不设固定阈值，而是统计大量点在视线方向上的偏差，取其 4 倍作为容差，并限制在 0.5% 到 10% 之间。这样既不会把正常表面误判为遮挡，也不会放过真正被挡住的点。
 同一个点在多张照片中会被看到，系统把各张照片的裂缝概率取平均，作为该点的最终分数。被看到的次数越少，说明结果越不可靠，显示时会把这类点压暗，减少照片边缘产生的假阳性。
 举例来说，岩壁背面的裂缝在从正面拍摄的照片里是看不到的；如果不做遮挡判断，它的概率会被错误地投到正面，形成一条实际不存在的裂缝。遮挡判断排除这类点后，再对真正可见的多个视角取平均，结果会稳定得多。
@@ -66,10 +67,10 @@ SegFormer-b0：SegFormer 结构，输入 512 × 512，训练数据为公开裂�
 每条裂缝的中心线保存为三种格式：带颜色和边元素的 PLY（可在 MeshLab 等软件中直接查看）、按裂缝编号分组的 JSON，以及逐点坐标的 CSV。主分析结果中也会写入每条裂缝的折线坐标和线长。网页上勾选“显示裂隙线”即可把中心线以可调宽度叠加在三维视图上。
 需要说明，裂缝的“长度”和“线长”含义不同：前者是稳健的跨度统计，后者是折线路径的实际长度，两者会略有差异。例如 rock 场景最长的一条裂缝长度约 0.89 个重建单位，折线长度约 0.95，差异来自折线沿着裂缝弯曲行走。导出的文件可以直接导入 MeshLab、CloudCompare 等软件，和其他测绘结果叠加使用。
 生成模型与点云的配准
-项目还实现了把图生 3D 生成的模型放回重建场景的功能。两者尺度、坐标和细节都不同，需要先按同一方向的宽度比例统一尺度，再用特征匹配做粗配准、用迭代最近点方法做精配准。
+项目还实现了把图生 3D 生成的模型放回重建场景的功能。两者尺度、坐标和细节都不同，需要先按同一方向的宽度比例统一尺度，再用特征匹配做粗配准、用迭代最近点方法做精配准[6][7][8]。
 由于重建点云常常只有一个近似平面的立面，沿墙面方向的平移几乎不影响重合度，自动配准容易把模型沿墙滑动。系统因此改用“搜索旋转角度加比较轮廓重合度”的方式确定方向，再让模型贴合表面。在 Sceaux 场景上，立面宽度比例为 10.778，最优旋转角为 5 度，轮廓重合度为 0.792，整个配准约 5.5 秒。这一功能与主裂缝检测流程相对独立，主要用于展示、叠加和对照；如果只需要裂缝结果，可以跳过。
 系统界面与功能
-系统采用本地网页应用的形式：后端用 FastAPI 提供数据和任务接口，前端用 Three.js 显示三维模型。重建、检测、分析等耗时操作在后台运行，网页通过实时消息显示进度和日志，用户可以中途停止。同一时间只允许一个重任务运行，避免两个任务同时占用显卡和内存。界面的设计目标是让不熟悉命令行的使用者也能完成整个流程，因此把参数放在左侧、结果和列表放在右侧，底部统一显示任务日志。
+系统采用本地网页应用的形式：后端用 FastAPI[12] 提供数据和任务接口，前端用 Three.js[13] 显示三维模型。重建、检测、分析等耗时操作在后台运行，网页通过实时消息显示进度和日志，用户可以中途停止。同一时间只允许一个重任务运行，避免两个任务同时占用显卡和内存。界面的设计目标是让不熟悉命令行的使用者也能完成整个流程，因此把参数放在左侧、结果和列表放在右侧，底部统一显示任务日志。
 数据按场景组织。每个场景下有照片、相机位置、稠密点云、网格和贴图；每次检测保存为一条“检测记录”，包含逐点分数、显示点云、2D 叠加图和检测参数；分析结果按记录分别导出，互不覆盖。
 重建界面可以选择照片文件夹、填写场景名，并调整特征匹配方式（全部两两匹配或按拍摄顺序匹配）、相机定位阈值（放宽或官方）、稠密重建精度、最大图像边长、是否细化网格、网格精度预设（标准、精细、极细）。勾选“只重做网格”时可以复用已有的稠密点云，只重新生成网格和纹理，适合只修改网格参数的情况；勾选“强制重跑”则会忽略已有结果，从头执行。
 检测界面支持多选模型（5 个 Tomt996 种子、CrackEvo、SegFormer、集成），选择快速档或原生分块、显卡或 CPU 推理、只检测前 N 张、是否生成 2D 叠加图。一次选择多个模型时，系统会依次运行，每个模型生成一条记录。检测完成后，记录列表显示名称、开始时间、模型和图像数量；用户可以改名、点击切换，当前记录的点云、裂缝列表、预览图和分析导出都会随之切换。
@@ -94,13 +95,17 @@ SegFormer-b0：SegFormer 结构，输入 512 × 512，训练数据为公开裂�
 本文实现了一套从照片到三维裂缝线几何的完整系统，覆盖相机定位、点云与网格生成、深度学习裂缝识别、二维到三维的投影与遮挡处理、裂缝点云聚类与中心线提取，以及面向使用者的网页界面。在 88 张无人机岩壁照片上，系统完成了 1344 万点、1120 万面的重建，提取出 23 条裂缝及其中心线，并支持多模型、多记录的对比分析与多格式导出。
 后续可以补充人工标注以给出像素级精度指标，借助参照物恢复真实尺度，研究更适应岩壁的裂缝模型，并对多次检测结果做变化分析，用于裂缝扩展监测。
 参考文献
-Schönberger J L, Frahm J M. Structure-from-Motion Revisited. CVPR, 2016.
-Cernea D. OpenMVS: Open Multi-View Stereo reconstruction library. https://github.com/cdcseacave/openMVS.
-Ronneberger O, Fischer P, Brox T. U-Net: Convolutional Networks for Biomedical Image Segmentation. MICCAI, 2015.
-Xie E, Wang W, Yu Z, et al. SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers. NeurIPS, 2021.
-Liu Y, Yao J, Lu X, et al. DeepCrack: A Deep Hierarchical Feature Learning Architecture for Crack Segmentation. Neurocomputing, 2019.
-Rusu R B, Blodow N, Beetz M. Fast Point Feature Histograms for 3D Registration. ICRA, 2009.
-Besl P J, McKay N D. A Method for Registration of 3-D Shapes. IEEE TPAMI, 1992.
-Zhou Q Y, Park J, Koltun V. Open3D: A Modern Library for 3D Data Processing. arXiv:1801.09847, 2018.
-Tomt996. uavcrack-crack-segmentation. https://huggingface.co/Tomt996/uavcrack-crack-segmentation.
-Dihao. crackevo-unet-r34. https://huggingface.co/Dihao/crackevo-unet-r34.
+[1] Schönberger J L, Frahm J M. Structure-from-Motion Revisited. CVPR, 2016.
+[2] Cernea D. OpenMVS: Open Multi-View Stereo reconstruction library. https://github.com/cdcseacave/openMVS.
+[3] Ronneberger O, Fischer P, Brox T. U-Net: Convolutional Networks for Biomedical Image Segmentation. MICCAI, 2015.
+[4] Xie E, Wang W, Yu Z, et al. SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers. NeurIPS, 2021.
+[5] Liu Y, Yao J, Lu X, et al. DeepCrack: A Deep Hierarchical Feature Learning Architecture for Crack Segmentation. Neurocomputing, 2019.
+[6] Rusu R B, Blodow N, Beetz M. Fast Point Feature Histograms for 3D Registration. ICRA, 2009.
+[7] Besl P J, McKay N D. A Method for Registration of 3-D Shapes. IEEE TPAMI, 1992.
+[8] Zhou Q Y, Park J, Koltun V. Open3D: A Modern Library for 3D Data Processing. arXiv:1801.09847, 2018.
+[9] Tomt996. uavcrack-crack-segmentation. https://huggingface.co/Tomt996/uavcrack-crack-segmentation.
+[10] Dihao. crackevo-unet-r34. https://huggingface.co/Dihao/crackevo-unet-r34.
+[11] varcoder. segformer-b4-crack-segmentation-dataset. https://huggingface.co/varcoder/segformer-b4-crack-segmentation-dataset.
+[12] Ramírez S. FastAPI. https://fastapi.tiangolo.com/.
+[13] three.js contributors. Three.js Documentation. https://threejs.org/docs/.
+[14] ONNX Runtime developers. ONNX Runtime. https://onnxruntime.ai/.
